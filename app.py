@@ -1380,7 +1380,7 @@ elif st.session_state.page == "summary":
                         continue
                     press = cell(row, c_press)
                     page = cell(row, c_page)
-                    url = cell(row, c_url) or cell(row, c_naver)
+                    url = cell(row, c_naver) or cell(row, c_url)
                     current["items"].append((press, page, title, url))
                 if current["items"]:
                     sections.append(current)
@@ -1393,7 +1393,7 @@ elif st.session_state.page == "summary":
                         lines.append(sec["name"])
                         lines.append("")
                     for press, page, title, url in sec["items"]:
-                        label = f"{press}({page})" if press and page else press
+                        label = press
                         lines.append(f"ㅇ {label}, {title}" if label else f"ㅇ {title}")
                         if url:
                             lines.append(url)
