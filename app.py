@@ -1323,70 +1323,132 @@ elif st.session_state.page == "summary":
                 """
                 <div class="sub-page-container">
                     <h2>🏢 1. 중기부 조간 요약 (맞춤 양식 변환)</h2>
-                    <p>데이터 파일을 업로드하시면 요청하신 보도 양식에 맞춘 TXT 요약본으로 자동 변환해 드립니다.</p>
+                    <p>중기부 조간 엑셀 파일(.xlsx)을 올리면 요약 TXT로 바로 변환됩니다.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            with st.container():
-                st.markdown("### 📂 조간 데이터 파일 업로드")
-                uploaded_macro_file = st.file_uploader(
-                    "중기부 조간 데이터 파일 (.xlsx, .xls)",
-                    type=["xlsx", "xls"],
-                    key="mss_uploader"
-                )
+            def build_mss_text(uploaded_file, include_stats=False):
+                """엑셀의 '기사 목록' 시트를 읽어 TXT 문자열과 기사 수를 돌려준다."""
+                if hasattr(uploaded_file, "seek"):
+                    uploaded_file.seek(0)
+                xls = pd.ExcelFile(uploaded_file)
+                sheet = "기사 목록" if "기사 목록" in xls.sheet_names else xls.sheet_names[0]
+                df = xls.parse(sheet, header=None, dtype=str).fillna("")
+                df = df.map(lambda v: str(v).strip())
 
-                if uploaded_macro_file is not None:
-                    try:
-                        excel_file = pd.ExcelFile(uploaded_macro_file)
-                        sheet_names = excel_file.sheet_names
-                        df_mss = pd.read_excel(uploaded_macro_file, sheet_name=sheet_names[0])
+                # 머리글 줄 찾기
+                header_idx = None
+                for i in range(len(df)):
+                    if any("제목" in v for v in df.iloc[i]):
+                        header_idx = i
+                        break
+                if header_idx is None:
+                    raise ValueError("'기사 제목' 머리글이 있는 줄을 찾을 수 없습니다.")
 
-                        st.success(f"데이터 로드 성공! (총 {len(df_mss)}행 감지)")
+                headers = [str(v).replace(" ", "").lower() for v in df.iloc[header_idx]]
 
-                        with st.expander("업로드된 데이터 미리보기"):
-                            st.dataframe(df_mss.head())
+                def find_col(test):
+                    for idx, h in enumerate(headers):
+                        if test(h):
+                            return idx
+                    return None
 
-                        if st.button("🚀 요청 양식으로 TXT 변환", key="run_mss_python", type="primary"):
-                            with st.spinner("요청하신 양식에 맞춰 변환 중..."):
+                c_title = find_col(lambda h: "제목" in h)
+                c_press = find_col(lambda h: "매체" in h)
+                c_page = find_col(lambda h: "지면번호" in h)
+                c_url = find_col(lambda h: "url" in h and "naver" not in h)
+                c_naver = find_col(lambda h: "naver" in h)
 
-                                cleaned_df = df_mss.dropna(how="all").fillna("")
+                def cell(row, col):
+                    return row.iloc[col] if col is not None else ""
 
-                                txt_lines = []
-                                txt_lines.append(f"< {today_title()}, 조간 주요 보도 >\n\n")
-                                txt_lines.append("■ 우리부 관련\n\n")
+                # 섹션(■ ...)별로 기사 묶기
+                sections = []
+                current = {"name": "", "items": []}
+                for i in range(header_idx + 1, len(df)):
+                    row = df.iloc[i]
+                    title = cell(row, c_title)
+                    if not title:
+                        continue
+                    others = [v for j, v in enumerate(row) if j != c_title and v]
+                    if title.startswith("■") and not others:
+                        if current["items"]:
+                            sections.append(current)
+                        current = {"name": title, "items": []}
+                        continue
+                    press = cell(row, c_press)
+                    page = cell(row, c_page)
+                    url = cell(row, c_url) or cell(row, c_naver)
+                    current["items"].append((press, page, title, url))
+                if current["items"]:
+                    sections.append(current)
 
-                                for idx, row in cleaned_df.iterrows():
-                                    row_vals = [str(val).strip() for val in row.values if str(val).strip() != ""]
-                                    if len(row_vals) >= 2:
-                                        press = row_vals[0]
-                                        title = row_vals[1]
-                                        link = row_vals[2] if len(row_vals) > 2 else ""
+                # TXT 만들기
+                lines = [f"< {today_title()}, 조간 주요 보도 >", ""]
+                total = 0
+                for sec in sections:
+                    if sec["name"]:
+                        lines.append(sec["name"])
+                        lines.append("")
+                    for press, page, title, url in sec["items"]:
+                        label = f"{press}({page})" if press and page else press
+                        lines.append(f"ㅇ {label}, {title}" if label else f"ㅇ {title}")
+                        if url:
+                            lines.append(url)
+                        lines.append("")
+                        total += 1
 
-                                        txt_lines.append(f"ㅇ {press}, {title}\n")
-                                        if link:
-                                            txt_lines.append(f"{link}\n\n")
-                                        else:
-                                            txt_lines.append("\n")
-                                    elif len(row_vals) == 1:
-                                        txt_lines.append(f"ㅇ {row_vals[0]}\n\n")
-
-                                text_content = "".join(txt_lines)
-
-                            st.success("양식 변환이 완료되었습니다!")
-                            st.text_area("변환된 텍스트 미리보기", text_content, height=350, key="mss_preview")
-
-                            st.download_button(
-                                label="📥 양식 맞춤 텍스트 파일 다운로드 (.txt)",
-                                data=text_content.encode("utf-8-sig"),
-                                file_name="중기부_조간요약_양식적용.txt",
-                                mime="text/plain",
-                                key="download_mss_txt"
+                # 선택: 매체별 통계
+                if include_stats and "통계" in xls.sheet_names:
+                    sdf = xls.parse("통계", header=None, dtype=str).fillna("")
+                    lines.append("■ 매체별 보도 현황")
+                    lines.append("")
+                    for i in range(1, len(sdf)):
+                        r = [str(v).strip() for v in sdf.iloc[i]]
+                        if len(r) >= 5 and r[0]:
+                            lines.append(
+                                f"ㅇ {r[0]}: 지면 {r[1]}건 / 온라인 {r[2]}건 / "
+                                f"방송 {r[3]}건 / 합계 {r[4]}건"
                             )
+                    lines.append("")
 
-                    except Exception as exc:
-                        st.error(f"데이터를 처리하는 도중 오류가 발생했습니다: {exc}")
+                return "\n".join(lines).rstrip() + "\n", total
+
+            st.markdown("### 📂 조간 데이터 파일 업로드")
+            uploaded_macro_file = st.file_uploader(
+                "중기부 조간 데이터 파일 (.xlsx, .xls)",
+                type=["xlsx", "xls"],
+                key="mss_uploader",
+            )
+            include_stats = st.checkbox(
+                "하단에 매체별 보도 현황(통계 시트) 포함",
+                value=False,
+                key="mss_include_stats",
+            )
+
+            if uploaded_macro_file is not None:
+                try:
+                    text_content, article_count = build_mss_text(
+                        uploaded_macro_file, include_stats
+                    )
+                    st.success(f"변환 완료! 기사 {article_count}건")
+                    st.text_area(
+                        "변환된 텍스트 미리보기",
+                        text_content,
+                        height=450,
+                        key="mss_preview",
+                    )
+                    st.download_button(
+                        label="📥 TXT 파일 다운로드",
+                        data=text_content.encode("utf-8-sig"),
+                        file_name=f"중기부_조간요약_{datetime.now(KST):%Y%m%d}.txt",
+                        mime="text/plain",
+                        key="download_mss_txt",
+                    )
+                except Exception as exc:
+                    st.error(f"데이터를 처리하는 도중 오류가 발생했습니다: {exc}")
 
         elif current_sum_sub == "mcst":
             st.markdown(
