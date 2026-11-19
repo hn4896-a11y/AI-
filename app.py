@@ -1455,8 +1455,153 @@ elif st.session_state.page == "summary":
                 """
                 <div class="sub-page-container">
                     <h2>🏛️ 2. 문체부 조간 요약</h2>
-                    <p>문화체육관광부 관련 조간 뉴스 및 주요 동향 요약 공간입니다.</p>
+                    <p>문체부 스크랩 엑셀 파일(.xlsx)을 올리면 요약 TXT로 바로 변환됩니다.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+
+            def build_mcst_text(uploaded_file, report_date):
+                """엑셀의 '기사 목록' 시트를 읽어 문체부 조간 요약 TXT를 만든다."""
+                if hasattr(uploaded_file, "seek"):
+                    uploaded_file.seek(0)
+                xls = pd.ExcelFile(uploaded_file)
+                sheet = "기사 목록" if "기사 목록" in xls.sheet_names else xls.sheet_names[0]
+                df = xls.parse(sheet, header=None, dtype=str).fillna("")
+                df = df.map(lambda v: str(v).strip())
+
+                # 머리글 줄 찾기
+                header_idx = None
+                for i in range(len(df)):
+                    if any("제목" in v for v in df.iloc[i]):
+                        header_idx = i
+                        break
+                if header_idx is None:
+                    raise ValueError("'기사 제목' 머리글이 있는 줄을 찾을 수 없습니다.")
+
+                headers = [str(v).replace(" ", "").lower() for v in df.iloc[header_idx]]
+
+                def find_col(test):
+                    for idx, h in enumerate(headers):
+                        if test(h):
+                            return idx
+                    return None
+
+                c_title = find_col(lambda h: "제목" in h)
+                c_press = find_col(lambda h: "매체" in h)
+                c_page = find_col(lambda h: "지면번호" in h)
+                c_url = find_col(lambda h: "url" in h and "naver" not in h)
+                c_naver = find_col(lambda h: "naver" in h)
+
+                def cell(row, col):
+                    return row.iloc[col] if col is not None else ""
+
+                # 소제목(*문화예술, <국정전반> 등)별로 기사 묶기
+                # 같은 제목·같은 매체가 여러 지면이면 지면번호를 합쳐 한 줄로 만든다
+                groups = []
+                current = None
+                merged = 0
+                for i in range(header_idx + 1, len(df)):
+                    row = df.iloc[i]
+                    title = cell(row, c_title)
+                    if not title:
+                        continue
+                    others = [v for j, v in enumerate(row) if j != c_title and v]
+                    if not others:
+                        current = {"name": title, "items": []}
+                        groups.append(current)
+                        continue
+                    if current is None:
+                        current = {"name": "", "items": []}
+                        groups.append(current)
+                    press = cell(row, c_press)
+                    page = cell(row, c_page)
+                    url = cell(row, c_naver) or cell(row, c_url)
+                    for item in current["items"]:
+                        if item["title"] == title and item["press"] == press:
+                            if page and page not in item["pages"]:
+                                item["pages"].append(page)
+                            if not item["url"]:
+                                item["url"] = url
+                            merged += 1
+                            break
+                    else:
+                        current["items"].append(
+                            {
+                                "title": title,
+                                "press": press,
+                                "pages": [page] if page else [],
+                                "url": url,
+                            }
+                        )
+
+                visible = [g for g in groups if g["items"]]
+
+                # TXT 만들기
+                weekday = WEEKDAYS[report_date.weekday()]
+                lines = [
+                    f"{report_date.month}.{report_date.day}({weekday}) 조간 언론보도 요약입니다",
+                    "",
+                ]
+                # 엑셀에 큰제목이 없으면 첫 소제목 앞에 <문체부 관련>을 넣는다
+                if visible and not visible[0]["name"].startswith("<"):
+                    lines += ["<문체부 관련>", ""]
+
+                total = 0
+                for n, g in enumerate(visible):
+                    if g["name"]:
+                        if g["name"].startswith("<") and n > 0:
+                            lines.append("")  # 큰제목 앞은 빈 줄을 한 번 더
+                        lines.append(g["name"])
+                        lines.append("")
+                    for item in g["items"]:
+                        tail = ", ".join(x for x in [item["press"]] + item["pages"] if x)
+                        if tail:
+                            lines.append(f"■ {item['title']}({tail})")
+                        else:
+                            lines.append(f"■ {item['title']}")
+                        if item["url"]:
+                            lines.append(item["url"])
+                        lines.append("")
+                        total += 1
+
+                return "\n".join(lines).rstrip() + "\n", total, merged
+
+            st.markdown("### 📂 문체부 스크랩 파일 업로드")
+            mcst_date = st.date_input(
+                "보고일",
+                value=datetime.now(KST).date(),
+                key="mcst_report_date",
+            )
+            uploaded_mcst_file = st.file_uploader(
+                "문체부 스크랩 기사 파일 (.xlsx, .xls)",
+                type=["xlsx", "xls"],
+                key="mcst_uploader",
+            )
+
+            if uploaded_mcst_file is not None:
+                try:
+                    mcst_text, mcst_count, mcst_merged = build_mcst_text(
+                        uploaded_mcst_file, mcst_date
+                    )
+                    st.success(f"변환 완료! 기사 {mcst_count}건")
+                    if mcst_merged:
+                        st.caption(
+                            f"같은 제목·매체의 여러 지면 {mcst_merged}건은 "
+                            "지면번호를 합쳐 한 줄로 표시했습니다."
+                        )
+                    st.text_area(
+                        "변환된 텍스트 미리보기",
+                        mcst_text,
+                        height=450,
+                        key="mcst_preview",
+                    )
+                    st.download_button(
+                        label="📥 TXT 파일 다운로드",
+                        data=mcst_text.encode("utf-8-sig"),
+                        file_name=f"문체부_조간요약_{mcst_date:%Y%m%d}.txt",
+                        mime="text/plain",
+                        key="download_mcst_txt",
+                    )
+                except Exception as exc:
+                    st.error(f"데이터를 처리하는 도중 오류가 발생했습니다: {exc}")
